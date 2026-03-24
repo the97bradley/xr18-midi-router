@@ -31,6 +31,8 @@ const midiOut = new midi.Output();
 const BANK_OFFSET = 0; // TODO: add banking (0 => channels 1-8)
 const lastMcuWriteAt = new Map(); // channelNumber -> timestamp(ms)
 const lastMotorRaw = new Map(); // channelNumber -> 14-bit value sent to motor
+const channelOnState = new Map(); // channelNumber -> 0|1  (XR18 /mix/on)
+const channelSoloState = new Map(); // channelNumber -> 0|1 (router-local mirror)
 
 function listPorts() {
   const ins = [];
@@ -100,28 +102,63 @@ function handleMcuMessage(delta, message) {
     return;
   }
 
-  // Note on/off for mute buttons (starter mapping)
-  // Common MCU mute note numbers: 0x10..0x17 (16..23) on channel 1
+  // Note buttons: treat as toggle on NOTE-ON only (ignore NOTE-OFF)
+  // MCU convention (typical):
+  // - Solo row: 0x08..0x0F
+  // - Mute row: 0x10..0x17
   const command = status & 0xf0;
   if (command === 0x90 || command === 0x80) {
     const note = data1;
     const velocity = data2;
-    const isOn = command === 0x90 && velocity > 0;
+    const noteOn = command === 0x90 && velocity > 0;
 
+    if (!noteOn) return;
+
+    // Mute toggle
     if (note >= 0x10 && note <= 0x17) {
       const strip = note - 0x10 + 1;
       const channelNumber = strip + BANK_OFFSET;
       const ch = String(channelNumber).padStart(2, "0");
       const addr = `/ch/${ch}/mix/on`;
-      const onValue = isOn ? 0 : 1; // mute button ON => channel OFF
 
-      dbg("mute", { strip, note, isOn, addr, onValue });
+      const currentOn = channelOnState.has(channelNumber)
+        ? channelOnState.get(channelNumber)
+        : 1;
+      const nextOn = currentOn ? 0 : 1;
+      channelOnState.set(channelNumber, nextOn);
+
+      dbg("mute-toggle", { strip, note, addr, currentOn, nextOn });
 
       oscPort.send({
         address: addr,
-        args: [{ type: "i", value: onValue }],
+        args: [{ type: "i", value: nextOn }],
       });
+      return;
     }
+
+    // Solo toggle (best-effort XR18 path)
+    if (note >= 0x08 && note <= 0x0f) {
+      const strip = note - 0x08 + 1;
+      const channelNumber = strip + BANK_OFFSET;
+      const ch = String(channelNumber).padStart(2, "0");
+      const addr = `/ch/${ch}/mix/solo`;
+
+      const currentSolo = channelSoloState.has(channelNumber)
+        ? channelSoloState.get(channelNumber)
+        : 0;
+      const nextSolo = currentSolo ? 0 : 1;
+      channelSoloState.set(channelNumber, nextSolo);
+
+      dbg("solo-toggle", { strip, note, addr, currentSolo, nextSolo });
+
+      oscPort.send({
+        address: addr,
+        args: [{ type: "i", value: nextSolo }],
+      });
+      return;
+    }
+
+    dbg("note-unmapped", { status, note, velocity });
   }
 }
 
@@ -161,7 +198,10 @@ function start() {
     setInterval(() => {
       for (let strip = 1; strip <= 8; strip++) {
         const channelNumber = strip + BANK_OFFSET;
+        const ch = String(channelNumber).padStart(2, "0");
         oscPort.send({ address: channelAddress(channelNumber), args: [] });
+        oscPort.send({ address: `/ch/${ch}/mix/on`, args: [] });
+        oscPort.send({ address: `/ch/${ch}/mix/solo`, args: [] });
       }
     }, 300);
   });
@@ -170,27 +210,44 @@ function start() {
     dbg("osc<-", msg.address, msg.args?.map((a) => a.value));
 
     const faderMatch = msg.address?.match(/^\/ch\/(\d{2})\/mix\/fader$/);
-    if (!faderMatch || !msg.args?.length) return;
+    if (faderMatch && msg.args?.length) {
+      const channelNumber = Number(faderMatch[1]);
+      const strip = channelNumber - BANK_OFFSET;
+      if (strip < 1 || strip > 8) return;
 
-    const channelNumber = Number(faderMatch[1]);
-    const strip = channelNumber - BANK_OFFSET;
-    if (strip < 1 || strip > 8) return;
+      const arg = msg.args[0];
+      const value = Number(arg?.value);
+      if (!Number.isFinite(value)) return;
 
-    const arg = msg.args[0];
-    const value = Number(arg?.value);
-    if (!Number.isFinite(value)) return;
+      const raw14 = clamp(Math.round(value * 16383), 0, 16383);
 
-    const raw14 = clamp(Math.round(value * 16383), 0, 16383);
+      // Avoid immediate motor-echo fights while user is actively moving that strip.
+      const lastWrite = lastMcuWriteAt.get(channelNumber) || 0;
+      if (Date.now() - lastWrite < 120) return;
 
-    // Avoid immediate motor-echo fights while user is actively moving that strip.
-    const lastWrite = lastMcuWriteAt.get(channelNumber) || 0;
-    if (Date.now() - lastWrite < 120) return;
+      const prev = lastMotorRaw.get(channelNumber);
+      if (prev === raw14) return;
 
-    const prev = lastMotorRaw.get(channelNumber);
-    if (prev === raw14) return;
+      sendMcuMotor(strip, raw14);
+      lastMotorRaw.set(channelNumber, raw14);
+      return;
+    }
 
-    sendMcuMotor(strip, raw14);
-    lastMotorRaw.set(channelNumber, raw14);
+    const onMatch = msg.address?.match(/^\/ch\/(\d{2})\/mix\/on$/);
+    if (onMatch && msg.args?.length) {
+      const channelNumber = Number(onMatch[1]);
+      const value = Number(msg.args[0]?.value);
+      if (Number.isFinite(value)) channelOnState.set(channelNumber, value ? 1 : 0);
+      return;
+    }
+
+    const soloMatch = msg.address?.match(/^\/ch\/(\d{2})\/mix\/solo$/);
+    if (soloMatch && msg.args?.length) {
+      const channelNumber = Number(soloMatch[1]);
+      const value = Number(msg.args[0]?.value);
+      if (Number.isFinite(value)) channelSoloState.set(channelNumber, value ? 1 : 0);
+      return;
+    }
   });
 
   midiIn.on("message", handleMcuMessage);
