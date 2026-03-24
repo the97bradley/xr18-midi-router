@@ -1,0 +1,25 @@
+{
+  "name": "xr18-midi-router",
+  "version": "0.1.0",
+  "description": "Bridge Mackie Control Unit (MCU) MIDI to Behringer XR18 OSC",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js --debug"
+  },
+  "keywords": [
+    "xr18",
+    "midi",
+    "mcu",
+    "osc",
+    "router"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "midi": "^2.0.0",
+    "minimist": "^1.2.8",
+    "osc": "^2.4.5"
+  }
+}
