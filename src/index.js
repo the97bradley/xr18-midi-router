@@ -178,7 +178,8 @@ function refreshSurface() {
     const channelNumber = strip + bankOffset;
     if (channelNumber >= 1 && channelNumber <= MAX_CHANNELS) {
       const rawName = channelNames.get(channelNumber) || `CH ${channelNumber}`;
-      const [top, bottom] = splitNameForScribble(rawName);
+      const displayName = `${channelNumber} ${normalizeChannelName(rawName)}`.trim();
+      const [top, bottom] = splitNameForScribble(displayName);
       writeMcuScribble(strip, top, bottom);
     } else {
       writeMcuScribble(strip, "", "");
@@ -431,7 +432,8 @@ function start() {
         const cleaned = normalizeChannelName(value);
         channelNames.set(channelNumber, cleaned);
         if (strip >= 1 && strip <= 8) {
-          const [top, bottom] = splitNameForScribble(cleaned);
+          const displayName = `${channelNumber} ${cleaned}`.trim();
+          const [top, bottom] = splitNameForScribble(displayName);
           writeMcuScribble(strip, top, bottom);
         }
       }
