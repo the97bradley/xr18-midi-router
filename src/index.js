@@ -149,12 +149,9 @@ function splitNameForScribble(channelNumber, name) {
     return [top, bottom];
   }
 
-  // Single-word
+  // Single-word: number on top, full word on bottom.
   const word = words[0];
-  const topWord = word.slice(0, room);
-  const top = `${prefix} ${topWord}`;
-  const bottom = word.slice(topWord.length);
-  return [top, bottom];
+  return [prefix, word];
 }
 
 function sendMcuMotor(strip, raw14) {
