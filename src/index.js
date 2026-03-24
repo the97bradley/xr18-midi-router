@@ -123,11 +123,37 @@ function writeMcuScribble(strip, topText = "", bottomText = "") {
 
 function splitNameForScribble(channelNumber, name) {
   const cleaned = normalizeChannelName(name);
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  const prefix = String(channelNumber);
+  const maxTop = 7;
+  const room = Math.max(0, maxTop - (prefix.length + 1));
 
-  // Keep number clearly on line 1, name on line 2.
-  // This avoids cramped labels like "1Vocal" and matches the requested format.
-  const top = String(channelNumber);
-  const bottom = cleaned;
+  if (!cleaned) return [prefix, ""];
+
+  // Strategy:
+  // - If we can fit number + at least a chunk of first word, do it.
+  // - Multi-word names: top gets number + first word chunk, bottom gets remaining words.
+  // - Single-word names: split the word across top/bottom to use full space.
+  if (room <= 0) return [prefix.slice(0, maxTop), cleaned];
+
+  if (words.length > 1) {
+    const first = words[0];
+    const topWord = first.slice(0, room);
+    const top = `${prefix} ${topWord}`;
+
+    let bottom = words.slice(1).join(" ");
+    if (first.length > topWord.length) {
+      const remainder = first.slice(topWord.length);
+      bottom = `${remainder} ${bottom}`.trim();
+    }
+    return [top, bottom];
+  }
+
+  // Single-word
+  const word = words[0];
+  const topWord = word.slice(0, room);
+  const top = `${prefix} ${topWord}`;
+  const bottom = word.slice(topWord.length);
   return [top, bottom];
 }
 
