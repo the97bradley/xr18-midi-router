@@ -121,16 +121,32 @@ function writeMcuScribble(strip, topText = "", bottomText = "") {
   sendText(bottomOffset, bottomText);
 }
 
-function splitNameForScribble(name) {
+function splitNameForScribble(channelNumber, name) {
   const cleaned = normalizeChannelName(name);
   const words = cleaned.split(/\s+/).filter(Boolean);
 
-  if (words.length <= 1) {
-    return [cleaned, ""];
+  const prefix = `${channelNumber}`;
+  const maxTop = 7;
+
+  if (!words.length) return [prefix, ""];
+
+  // Always keep the number on line 1. Try to fit at least part of first word.
+  let top = `${prefix} ${words[0]}`.trim();
+  if (top.length > maxTop) {
+    // Fall back to short top: just number + first 1-3 chars of first word if possible.
+    const room = Math.max(0, maxTop - (prefix.length + 1));
+    top = room > 0 ? `${prefix} ${words[0].slice(0, room)}` : prefix.slice(0, maxTop);
   }
 
-  const top = words[0];
-  const bottom = words.slice(1).join(" ");
+  // Bottom gets remaining text with minimal waste.
+  let bottomWords = words.slice(1);
+
+  // If top had to truncate first word heavily, keep full first word on bottom too.
+  if (!top.includes(words[0]) && words[0]) {
+    bottomWords = [words[0], ...bottomWords];
+  }
+
+  const bottom = bottomWords.join(" ");
   return [top, bottom];
 }
 
@@ -178,8 +194,7 @@ function refreshSurface() {
     const channelNumber = strip + bankOffset;
     if (channelNumber >= 1 && channelNumber <= MAX_CHANNELS) {
       const rawName = channelNames.get(channelNumber) || `CH ${channelNumber}`;
-      const displayName = `${channelNumber} ${normalizeChannelName(rawName)}`.trim();
-      const [top, bottom] = splitNameForScribble(displayName);
+      const [top, bottom] = splitNameForScribble(channelNumber, rawName);
       writeMcuScribble(strip, top, bottom);
     } else {
       writeMcuScribble(strip, "", "");
@@ -432,8 +447,7 @@ function start() {
         const cleaned = normalizeChannelName(value);
         channelNames.set(channelNumber, cleaned);
         if (strip >= 1 && strip <= 8) {
-          const displayName = `${channelNumber} ${cleaned}`.trim();
-          const [top, bottom] = splitNameForScribble(displayName);
+          const [top, bottom] = splitNameForScribble(channelNumber, cleaned);
           writeMcuScribble(strip, top, bottom);
         }
       }
