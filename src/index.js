@@ -28,6 +28,10 @@ const oscPort = new osc.UDPPort({
 const midiIn = new midi.Input();
 const midiOut = new midi.Output();
 
+const BANK_OFFSET = 0; // TODO: add banking (0 => channels 1-8)
+const lastMcuWriteAt = new Map(); // channelNumber -> timestamp(ms)
+const lastMotorRaw = new Map(); // channelNumber -> 14-bit value sent to motor
+
 function listPorts() {
   const ins = [];
   const outs = [];
@@ -60,17 +64,33 @@ function clamp(v, min, max) {
 
 // Basic channel map: MCU faders 1-8 -> XR18 channels 1-8
 // Pitch bend status: 0xE0..0xE7 (ch 1..8)
+function channelAddress(channelNumber) {
+  const ch = String(channelNumber).padStart(2, "0");
+  return `/ch/${ch}/mix/fader`;
+}
+
+function sendMcuMotor(strip, raw14) {
+  // Mackie motor faders use pitch bend per strip channel.
+  const status = 0xe0 + (strip - 1); // strip 1 => 0xE0
+  const lsb = raw14 & 0x7f;
+  const msb = (raw14 >> 7) & 0x7f;
+  midiOut.sendMessage([status, lsb, msb]);
+}
+
 function handleMcuMessage(delta, message) {
   const [status, data1, data2] = message;
 
   // Pitch bend (14-bit) for faders.
   if ((status & 0xf0) === 0xe0) {
     const strip = (status & 0x0f) + 1; // 1..8
+    const channelNumber = strip + BANK_OFFSET;
     const raw14 = (data2 << 7) | data1; // 0..16383
     const linear = clamp(raw14 / 16383, 0, 1);
-    const addr = `/ch/0${strip}/mix/fader`.replace("/ch/010", "/ch/10").replace("/ch/011", "/ch/11").replace("/ch/012", "/ch/12");
+    const addr = channelAddress(channelNumber);
 
-    dbg("fader", { strip, raw14, linear, addr });
+    lastMcuWriteAt.set(channelNumber, Date.now());
+
+    dbg("fader", { strip, channelNumber, raw14, linear, addr });
 
     oscPort.send({
       address: addr,
@@ -90,7 +110,9 @@ function handleMcuMessage(delta, message) {
 
     if (note >= 0x10 && note <= 0x17) {
       const strip = note - 0x10 + 1;
-      const addr = `/ch/0${strip}/mix/on`.replace("/ch/010", "/ch/10").replace("/ch/011", "/ch/11").replace("/ch/012", "/ch/12");
+      const channelNumber = strip + BANK_OFFSET;
+      const ch = String(channelNumber).padStart(2, "0");
+      const addr = `/ch/${ch}/mix/on`;
       const onValue = isOn ? 0 : 1; // mute button ON => channel OFF
 
       dbg("mute", { strip, note, isOn, addr, onValue });
@@ -129,16 +151,46 @@ function start() {
   oscPort.on("ready", () => {
     log(`OSC ready (local ${argv["listen-port"]})`);
 
-    // Subscribe for meter/state updates later.
+    // Keep XR remote session alive.
     oscPort.send({ address: "/xremote", args: [] });
     setInterval(() => {
       oscPort.send({ address: "/xremote", args: [] });
     }, 9000);
+
+    // Poll active bank fader states so MCU motor faders stay synchronized.
+    setInterval(() => {
+      for (let strip = 1; strip <= 8; strip++) {
+        const channelNumber = strip + BANK_OFFSET;
+        oscPort.send({ address: channelAddress(channelNumber), args: [] });
+      }
+    }, 300);
   });
 
   oscPort.on("message", (msg) => {
     dbg("osc<-", msg.address, msg.args?.map((a) => a.value));
-    // TODO: map XR18 state back to MCU motor faders and LEDs.
+
+    const faderMatch = msg.address?.match(/^\/ch\/(\d{2})\/mix\/fader$/);
+    if (!faderMatch || !msg.args?.length) return;
+
+    const channelNumber = Number(faderMatch[1]);
+    const strip = channelNumber - BANK_OFFSET;
+    if (strip < 1 || strip > 8) return;
+
+    const arg = msg.args[0];
+    const value = Number(arg?.value);
+    if (!Number.isFinite(value)) return;
+
+    const raw14 = clamp(Math.round(value * 16383), 0, 16383);
+
+    // Avoid immediate motor-echo fights while user is actively moving that strip.
+    const lastWrite = lastMcuWriteAt.get(channelNumber) || 0;
+    if (Date.now() - lastWrite < 120) return;
+
+    const prev = lastMotorRaw.get(channelNumber);
+    if (prev === raw14) return;
+
+    sendMcuMotor(strip, raw14);
+    lastMotorRaw.set(channelNumber, raw14);
   });
 
   midiIn.on("message", handleMcuMessage);

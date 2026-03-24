@@ -4,11 +4,12 @@ MCU (Mackie Control Unit) ↔ XR18 bridge.
 
 This is a lightweight daemon that translates MCU MIDI controls to XR18 OSC.
 
-## What works (v0.1)
+## What works (v0.2)
 
 - Detect/connect MIDI in/out ports (MCU)
 - Fader mapping: MCU strips 1-8 → XR18 channels 1-8 (`/ch/01..08/mix/fader`)
 - Basic mute mapping: MCU mute notes 0x10..0x17 → `/ch/01..08/mix/on`
+- Polls XR18 fader values and drives MCU motorized faders to stay synced
 - Keeps XR18 remote session alive via `/xremote`
 
 ## Next
