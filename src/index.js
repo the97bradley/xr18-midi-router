@@ -121,6 +121,19 @@ function writeMcuScribble(strip, topText = "", bottomText = "") {
   sendText(bottomOffset, bottomText);
 }
 
+function splitNameForScribble(name) {
+  const cleaned = normalizeChannelName(name);
+  const words = cleaned.split(/\s+/).filter(Boolean);
+
+  if (words.length <= 1) {
+    return [cleaned, ""];
+  }
+
+  const top = words[0];
+  const bottom = words.slice(1).join(" ");
+  return [top, bottom];
+}
+
 function sendMcuMotor(strip, raw14) {
   // Mackie motor faders use pitch bend per strip channel.
   const status = 0xe0 + (strip - 1); // strip 1 => 0xE0
@@ -165,8 +178,8 @@ function refreshSurface() {
     const channelNumber = strip + bankOffset;
     if (channelNumber >= 1 && channelNumber <= MAX_CHANNELS) {
       const rawName = channelNames.get(channelNumber) || `CH ${channelNumber}`;
-      const name = normalizeChannelName(rawName);
-      writeMcuScribble(strip, name, "");
+      const [top, bottom] = splitNameForScribble(rawName);
+      writeMcuScribble(strip, top, bottom);
     } else {
       writeMcuScribble(strip, "", "");
       sendMcuMotor(strip, 0);
@@ -418,7 +431,8 @@ function start() {
         const cleaned = normalizeChannelName(value);
         channelNames.set(channelNumber, cleaned);
         if (strip >= 1 && strip <= 8) {
-          writeMcuScribble(strip, cleaned, "");
+          const [top, bottom] = splitNameForScribble(cleaned);
+          writeMcuScribble(strip, top, bottom);
         }
       }
       return;
