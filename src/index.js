@@ -29,7 +29,8 @@ const oscPort = new osc.UDPPort({
 const midiIn = new midi.Input();
 const midiOut = new midi.Output();
 
-const BANK_OFFSET = 0; // TODO: add banking (0 => channels 1-8)
+let bankOffset = 0; // 0 => channels 1-8
+const MAX_CHANNELS = 18;
 const lastMcuWriteAt = new Map(); // channelNumber -> timestamp(ms)
 const lastMotorRaw = new Map(); // channelNumber -> 14-bit value sent to motor
 const channelOnState = new Map(); // channelNumber -> 0|1  (XR18 /mix/on)
@@ -130,15 +131,48 @@ function updateStripLeds(strip, channelNumber) {
   const muteNote = 0x10 + (strip - 1);
   const soloNote = 0x08 + (strip - 1);
 
+  if (channelNumber < 1 || channelNumber > MAX_CHANNELS) {
+    setButtonLed(muteNote, false);
+    setButtonLed(soloNote, false);
+    return;
+  }
+
   const onState = channelOnState.get(channelNumber);
   if (typeof onState === "number") {
     const muted = onState === 0;
     setButtonLed(muteNote, muted);
+  } else {
+    setButtonLed(muteNote, false);
   }
 
   const soloState = channelSoloState.get(channelNumber);
   if (typeof soloState === "number") {
     setButtonLed(soloNote, !!soloState);
+  } else {
+    setButtonLed(soloNote, false);
+  }
+}
+
+function refreshSurface() {
+  for (let strip = 1; strip <= 8; strip++) {
+    const channelNumber = strip + bankOffset;
+    if (channelNumber >= 1 && channelNumber <= MAX_CHANNELS) {
+      const name = channelNames.get(channelNumber) || `CH ${channelNumber}`;
+      writeMcuScribble(strip, name, strip === 8 ? targetLabel() : "");
+    } else {
+      writeMcuScribble(strip, "", strip === 8 ? targetLabel() : "");
+      sendMcuMotor(strip, 0);
+    }
+    updateStripLeds(strip, channelNumber);
+  }
+}
+
+function shiftBank(delta) {
+  const old = bankOffset;
+  bankOffset = Math.max(0, Math.min(MAX_CHANNELS - 1, bankOffset + delta));
+  if (old !== bankOffset) {
+    log(`Bank shifted: channels ${bankOffset + 1}-${bankOffset + 8}`);
+    refreshSurface();
   }
 }
 
@@ -162,7 +196,8 @@ function handleMcuMessage(delta, message) {
       return;
     }
 
-    const channelNumber = strip + BANK_OFFSET;
+    const channelNumber = strip + bankOffset;
+    if (channelNumber < 1 || channelNumber > MAX_CHANNELS) return;
     const addr = channelAddress(channelNumber);
 
     lastMcuWriteAt.set(channelNumber, Date.now());
@@ -189,10 +224,30 @@ function handleMcuMessage(delta, message) {
 
     if (!noteOn) return;
 
+    // Navigation: channel/bank left-right
+    // Common MCU notes: CH< 0x2E, CH> 0x2F, BANK< 0x30, BANK> 0x31
+    if (note === 0x2e) {
+      shiftBank(-1);
+      return;
+    }
+    if (note === 0x2f) {
+      shiftBank(1);
+      return;
+    }
+    if (note === 0x30) {
+      shiftBank(-8);
+      return;
+    }
+    if (note === 0x31) {
+      shiftBank(8);
+      return;
+    }
+
     // Mute toggle
     if (note >= 0x10 && note <= 0x17) {
       const strip = note - 0x10 + 1;
-      const channelNumber = strip + BANK_OFFSET;
+      const channelNumber = strip + bankOffset;
+      if (channelNumber < 1 || channelNumber > MAX_CHANNELS) return;
       const ch = String(channelNumber).padStart(2, "0");
       const addr = `/ch/${ch}/mix/on`;
 
@@ -215,7 +270,8 @@ function handleMcuMessage(delta, message) {
     // Solo toggle (best-effort XR18 path)
     if (note >= 0x08 && note <= 0x0f) {
       const strip = note - 0x08 + 1;
-      const channelNumber = strip + BANK_OFFSET;
+      const channelNumber = strip + bankOffset;
+      if (channelNumber < 1 || channelNumber > MAX_CHANNELS) return;
       const ch = String(channelNumber).padStart(2, "0");
       const addr = `/ch/${ch}/mix/solo`;
       const altAddr = `/-stat/solosw/${ch}`;
@@ -280,7 +336,8 @@ function start() {
     // Poll active bank fader states so MCU motor faders stay synchronized.
     setInterval(() => {
       for (let strip = 1; strip <= 8; strip++) {
-        const channelNumber = strip + BANK_OFFSET;
+        const channelNumber = strip + bankOffset;
+        if (channelNumber < 1 || channelNumber > MAX_CHANNELS) continue;
         const ch = String(channelNumber).padStart(2, "0");
         oscPort.send({ address: channelAddress(channelNumber), args: [] });
         oscPort.send({ address: `/ch/${ch}/mix/on`, args: [] });
@@ -293,16 +350,14 @@ function start() {
     // Poll names at slower cadence and update scribble strips.
     setInterval(() => {
       for (let strip = 1; strip <= 8; strip++) {
-        const channelNumber = strip + BANK_OFFSET;
+        const channelNumber = strip + bankOffset;
+        if (channelNumber < 1 || channelNumber > MAX_CHANNELS) continue;
         oscPort.send({ address: channelNameAddress(channelNumber), args: [] });
       }
     }, 2000);
 
     // Initial labels until names arrive.
-    for (let strip = 1; strip <= 8; strip++) {
-      writeMcuScribble(strip, `CH ${strip + BANK_OFFSET}`, "");
-    }
-    writeMcuScribble(8, `CH ${8 + BANK_OFFSET}`, targetLabel());
+    refreshSurface();
   });
 
   oscPort.on("message", (msg) => {
@@ -311,7 +366,7 @@ function start() {
     const faderMatch = msg.address?.match(/^\/ch\/(\d{2})\/mix\/fader$/);
     if (faderMatch && msg.args?.length) {
       const channelNumber = Number(faderMatch[1]);
-      const strip = channelNumber - BANK_OFFSET;
+      const strip = channelNumber - bankOffset;
       if (strip < 1 || strip > 8) return;
 
       const arg = msg.args[0];
@@ -349,7 +404,7 @@ function start() {
     const nameMatch = msg.address?.match(/^\/ch\/(\d{2})\/config\/name$/);
     if (nameMatch && msg.args?.length) {
       const channelNumber = Number(nameMatch[1]);
-      const strip = channelNumber - BANK_OFFSET;
+      const strip = channelNumber - bankOffset;
       const value = msg.args[0]?.value;
       if (typeof value === "string") {
         channelNames.set(channelNumber, value);
@@ -366,7 +421,7 @@ function start() {
       const value = Number(msg.args[0]?.value);
       if (Number.isFinite(value)) {
         channelOnState.set(channelNumber, value ? 1 : 0);
-        const strip = channelNumber - BANK_OFFSET;
+        const strip = channelNumber - bankOffset;
         if (strip >= 1 && strip <= 8) updateStripLeds(strip, channelNumber);
       }
       return;
@@ -378,7 +433,7 @@ function start() {
       const value = Number(msg.args[0]?.value);
       if (Number.isFinite(value)) {
         channelSoloState.set(channelNumber, value ? 1 : 0);
-        const strip = channelNumber - BANK_OFFSET;
+        const strip = channelNumber - bankOffset;
         if (strip >= 1 && strip <= 8) updateStripLeds(strip, channelNumber);
       }
       return;
@@ -390,7 +445,7 @@ function start() {
       const value = Number(msg.args[0]?.value);
       if (Number.isFinite(value)) {
         channelSoloState.set(channelNumber, value ? 1 : 0);
-        const strip = channelNumber - BANK_OFFSET;
+        const strip = channelNumber - bankOffset;
         if (strip >= 1 && strip <= 8) updateStripLeds(strip, channelNumber);
       }
       return;

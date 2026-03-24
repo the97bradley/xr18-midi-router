@@ -12,6 +12,7 @@ This is a lightweight daemon that translates MCU MIDI controls to XR18 OSC.
 - Polls XR18 fader values and drives MCU motorized faders to stay synced
 - Pulls channel names and writes them to MCU scribble strips
 - Master fader maps to LR master by default, or a send master via `--send 1..6`
+- Channel/Bank nav buttons shift visible strips (CH ±1, BANK ±8)
 - Keeps XR18 remote session alive via `/xremote`
 
 ## Next
