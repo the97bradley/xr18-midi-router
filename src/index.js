@@ -94,6 +94,13 @@ function targetLabel() {
   return send >= 1 && send <= 6 ? `SND ${send}` : "MAIN LR";
 }
 
+function normalizeChannelName(name) {
+  const s = (name || "").toString().trim();
+  // Strip leading channel index patterns like:
+  // "1 - Vocal", "01- Kick", "2: Bass", "3.Tom"
+  return s.replace(/^\s*\d{1,2}\s*[-:.]\s*/u, "").trim() || s;
+}
+
 function toLcdText(s, len = 7) {
   const clean = (s || "").toString().replace(/[^\x20-\x7E]/g, " ").slice(0, len);
   return clean.padEnd(len, " ");
@@ -157,10 +164,11 @@ function refreshSurface() {
   for (let strip = 1; strip <= 8; strip++) {
     const channelNumber = strip + bankOffset;
     if (channelNumber >= 1 && channelNumber <= MAX_CHANNELS) {
-      const name = channelNames.get(channelNumber) || `CH ${channelNumber}`;
-      writeMcuScribble(strip, name, strip === 8 ? targetLabel() : "");
+      const rawName = channelNames.get(channelNumber) || `CH ${channelNumber}`;
+      const name = normalizeChannelName(rawName);
+      writeMcuScribble(strip, name, "");
     } else {
-      writeMcuScribble(strip, "", strip === 8 ? targetLabel() : "");
+      writeMcuScribble(strip, "", "");
       sendMcuMotor(strip, 0);
     }
     updateStripLeds(strip, channelNumber);
@@ -225,20 +233,20 @@ function handleMcuMessage(delta, message) {
     if (!noteOn) return;
 
     // Navigation: channel/bank left-right
-    // Common MCU notes: CH< 0x2E, CH> 0x2F, BANK< 0x30, BANK> 0x31
-    if (note === 0x2e) {
+    // This MCU reports CH< > as 0x30/0x31 and BANK< > as 0x2E/0x2F.
+    if (note === 0x30) {
       shiftBank(-1);
       return;
     }
-    if (note === 0x2f) {
+    if (note === 0x31) {
       shiftBank(1);
       return;
     }
-    if (note === 0x30) {
+    if (note === 0x2e) {
       shiftBank(-8);
       return;
     }
-    if (note === 0x31) {
+    if (note === 0x2f) {
       shiftBank(8);
       return;
     }
@@ -407,9 +415,10 @@ function start() {
       const strip = channelNumber - bankOffset;
       const value = msg.args[0]?.value;
       if (typeof value === "string") {
-        channelNames.set(channelNumber, value);
+        const cleaned = normalizeChannelName(value);
+        channelNames.set(channelNumber, cleaned);
         if (strip >= 1 && strip <= 8) {
-          writeMcuScribble(strip, value, strip === 8 ? targetLabel() : "");
+          writeMcuScribble(strip, cleaned, "");
         }
       }
       return;
