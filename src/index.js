@@ -9,6 +9,7 @@ const argv = minimist(process.argv.slice(2), {
     "xr18-ip": process.env.XR18_IP || "192.168.1.100",
     "xr18-port": Number(process.env.XR18_PORT || 10024),
     "listen-port": Number(process.env.LISTEN_PORT || 10025),
+    send: Number(process.env.XR18_SEND || 0), // 0=LR, 1..6=bus send masters
     debug: false,
   },
 });
@@ -33,6 +34,8 @@ const lastMcuWriteAt = new Map(); // channelNumber -> timestamp(ms)
 const lastMotorRaw = new Map(); // channelNumber -> 14-bit value sent to motor
 const channelOnState = new Map(); // channelNumber -> 0|1  (XR18 /mix/on)
 const channelSoloState = new Map(); // channelNumber -> 0|1 (router-local mirror)
+const channelNames = new Map(); // channelNumber -> string
+let masterRaw = 0;
 
 function listPorts() {
   const ins = [];
@@ -71,6 +74,45 @@ function channelAddress(channelNumber) {
   return `/ch/${ch}/mix/fader`;
 }
 
+function channelNameAddress(channelNumber) {
+  const ch = String(channelNumber).padStart(2, "0");
+  return `/ch/${ch}/config/name`;
+}
+
+function masterAddress() {
+  const send = Number(argv.send) || 0;
+  if (send >= 1 && send <= 6) {
+    const bus = String(send).padStart(2, "0");
+    return `/bus/${bus}/mix/fader`;
+  }
+  return `/lr/mix/fader`;
+}
+
+function targetLabel() {
+  const send = Number(argv.send) || 0;
+  return send >= 1 && send <= 6 ? `SND ${send}` : "MAIN LR";
+}
+
+function toLcdText(s, len = 7) {
+  const clean = (s || "").toString().replace(/[^\x20-\x7E]/g, " ").slice(0, len);
+  return clean.padEnd(len, " ");
+}
+
+function writeMcuScribble(strip, topText = "", bottomText = "") {
+  // Mackie LCD SysEx: F0 00 00 66 14 12 <offset> <ascii...> F7
+  // 2 rows x 56 chars. Each strip width = 7 chars.
+  const topOffset = (strip - 1) * 7;
+  const bottomOffset = 56 + (strip - 1) * 7;
+
+  const sendText = (offset, text) => {
+    const bytes = Array.from(Buffer.from(toLcdText(text, 7), "ascii"));
+    midiOut.sendMessage([0xf0, 0x00, 0x00, 0x66, 0x14, 0x12, offset, ...bytes, 0xf7]);
+  };
+
+  sendText(topOffset, topText);
+  sendText(bottomOffset, bottomText);
+}
+
 function sendMcuMotor(strip, raw14) {
   // Mackie motor faders use pitch bend per strip channel.
   const status = 0xe0 + (strip - 1); // strip 1 => 0xE0
@@ -105,10 +147,22 @@ function handleMcuMessage(delta, message) {
 
   // Pitch bend (14-bit) for faders.
   if ((status & 0xf0) === 0xe0) {
-    const strip = (status & 0x0f) + 1; // 1..8
-    const channelNumber = strip + BANK_OFFSET;
+    const strip = (status & 0x0f) + 1; // 1..8 strips, 9=master
     const raw14 = (data2 << 7) | data1; // 0..16383
     const linear = clamp(raw14 / 16383, 0, 1);
+
+    if (strip === 9) {
+      const addr = masterAddress();
+      lastMcuWriteAt.set(1000, Date.now()); // sentinel for master touch guard
+      dbg("master", { strip, raw14, linear, addr, target: targetLabel() });
+      oscPort.send({
+        address: addr,
+        args: [{ type: "f", value: linear }],
+      });
+      return;
+    }
+
+    const channelNumber = strip + BANK_OFFSET;
     const addr = channelAddress(channelNumber);
 
     lastMcuWriteAt.set(channelNumber, Date.now());
@@ -233,7 +287,22 @@ function start() {
         oscPort.send({ address: `/ch/${ch}/mix/solo`, args: [] });
         oscPort.send({ address: `/-stat/solosw/${ch}`, args: [] });
       }
+      oscPort.send({ address: masterAddress(), args: [] });
     }, 300);
+
+    // Poll names at slower cadence and update scribble strips.
+    setInterval(() => {
+      for (let strip = 1; strip <= 8; strip++) {
+        const channelNumber = strip + BANK_OFFSET;
+        oscPort.send({ address: channelNameAddress(channelNumber), args: [] });
+      }
+    }, 2000);
+
+    // Initial labels until names arrive.
+    for (let strip = 1; strip <= 8; strip++) {
+      writeMcuScribble(strip, `CH ${strip + BANK_OFFSET}`, "");
+    }
+    writeMcuScribble(8, `CH ${8 + BANK_OFFSET}`, targetLabel());
   });
 
   oscPort.on("message", (msg) => {
@@ -260,6 +329,34 @@ function start() {
 
       sendMcuMotor(strip, raw14);
       lastMotorRaw.set(channelNumber, raw14);
+      return;
+    }
+
+    if (msg.address === masterAddress() && msg.args?.length) {
+      const value = Number(msg.args[0]?.value);
+      if (!Number.isFinite(value)) return;
+      const raw14 = clamp(Math.round(value * 16383), 0, 16383);
+
+      const lastWrite = lastMcuWriteAt.get(1000) || 0;
+      if (Date.now() - lastWrite < 120) return;
+      if (masterRaw !== raw14) {
+        sendMcuMotor(9, raw14);
+        masterRaw = raw14;
+      }
+      return;
+    }
+
+    const nameMatch = msg.address?.match(/^\/ch\/(\d{2})\/config\/name$/);
+    if (nameMatch && msg.args?.length) {
+      const channelNumber = Number(nameMatch[1]);
+      const strip = channelNumber - BANK_OFFSET;
+      const value = msg.args[0]?.value;
+      if (typeof value === "string") {
+        channelNames.set(channelNumber, value);
+        if (strip >= 1 && strip <= 8) {
+          writeMcuScribble(strip, value, strip === 8 ? targetLabel() : "");
+        }
+      }
       return;
     }
 
