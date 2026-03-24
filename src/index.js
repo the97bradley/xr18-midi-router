@@ -37,6 +37,7 @@ const channelOnState = new Map(); // channelNumber -> 0|1  (XR18 /mix/on)
 const channelSoloState = new Map(); // channelNumber -> 0|1 (router-local mirror)
 const channelNames = new Map(); // channelNumber -> string
 let masterRaw = 0;
+let currentSend = Math.max(0, Math.min(6, Number(argv.send) || 0)); // 0=LR, 1..6 sends
 
 function listPorts() {
   const ins = [];
@@ -72,6 +73,10 @@ function clamp(v, min, max) {
 // Pitch bend status: 0xE0..0xE7 (ch 1..8)
 function channelAddress(channelNumber) {
   const ch = String(channelNumber).padStart(2, "0");
+  if (currentSend >= 1 && currentSend <= 6) {
+    const bus = String(currentSend).padStart(2, "0");
+    return `/ch/${ch}/mix/${bus}/level`;
+  }
   return `/ch/${ch}/mix/fader`;
 }
 
@@ -81,17 +86,15 @@ function channelNameAddress(channelNumber) {
 }
 
 function masterAddress() {
-  const send = Number(argv.send) || 0;
-  if (send >= 1 && send <= 6) {
-    const bus = String(send).padStart(2, "0");
+  if (currentSend >= 1 && currentSend <= 6) {
+    const bus = String(currentSend).padStart(2, "0");
     return `/bus/${bus}/mix/fader`;
   }
   return `/lr/mix/fader`;
 }
 
 function targetLabel() {
-  const send = Number(argv.send) || 0;
-  return send >= 1 && send <= 6 ? `SND ${send}` : "MAIN LR";
+  return currentSend >= 1 && currentSend <= 6 ? `S${currentSend}` : "LR";
 }
 
 function normalizeChannelName(name) {
@@ -196,19 +199,31 @@ function updateStripLeds(strip, channelNumber) {
   }
 }
 
+function stripBottomLabel(strip, defaultBottom) {
+  return strip === 8 ? targetLabel() : defaultBottom;
+}
+
 function refreshSurface() {
   for (let strip = 1; strip <= 8; strip++) {
     const channelNumber = strip + bankOffset;
     if (channelNumber >= 1 && channelNumber <= MAX_CHANNELS) {
       const rawName = channelNames.get(channelNumber) || `CH ${channelNumber}`;
       const [top, bottom] = splitNameForScribble(channelNumber, rawName);
-      writeMcuScribble(strip, top, bottom);
+      writeMcuScribble(strip, top, stripBottomLabel(strip, bottom));
     } else {
-      writeMcuScribble(strip, "", "");
+      writeMcuScribble(strip, "", stripBottomLabel(strip, ""));
       sendMcuMotor(strip, 0);
     }
     updateStripLeds(strip, channelNumber);
   }
+}
+
+function setSendMode(next) {
+  const clamped = Math.max(0, Math.min(6, next));
+  if (clamped === currentSend) return;
+  currentSend = clamped;
+  log(`Send mode: ${targetLabel()}`);
+  refreshSurface();
 }
 
 function shiftBank(delta) {
@@ -267,6 +282,16 @@ function handleMcuMessage(delta, message) {
     const noteOn = command === 0x90 && velocity > 0;
 
     if (!noteOn) return;
+
+    // Send mode toggle via buttons next to ZOOM (observed: 0x6F left, 0x70 right)
+    if (note === 0x6f) {
+      setSendMode(currentSend - 1);
+      return;
+    }
+    if (note === 0x70) {
+      setSendMode(currentSend + 1);
+      return;
+    }
 
     // Navigation: channel/bank left-right
     // This MCU reports CH< > as 0x30/0x31 and BANK< > as 0x2E/0x2F.
@@ -455,7 +480,7 @@ function start() {
         channelNames.set(channelNumber, cleaned);
         if (strip >= 1 && strip <= 8) {
           const [top, bottom] = splitNameForScribble(channelNumber, cleaned);
-          writeMcuScribble(strip, top, bottom);
+          writeMcuScribble(strip, top, stripBottomLabel(strip, bottom));
         }
       }
       return;
