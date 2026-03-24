@@ -103,7 +103,10 @@ function normalizeChannelName(name) {
 
 function toLcdText(s, len = 7) {
   const clean = (s || "").toString().replace(/[^\x20-\x7E]/g, " ").slice(0, len);
-  return clean.padEnd(len, " ");
+  const totalPad = Math.max(0, len - clean.length);
+  const left = Math.floor(totalPad / 2);
+  const right = totalPad - left;
+  return `${" ".repeat(left)}${clean}${" ".repeat(right)}`;
 }
 
 function writeMcuScribble(strip, topText = "", bottomText = "") {
